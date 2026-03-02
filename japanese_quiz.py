@@ -1,17 +1,15 @@
 import random
+import json
 
-vocab_dict = {
-    "うまい" : "tasty",
-    "さむい" : "cold",
-    "あつい" : "hot"
-}
+with open('d:/python/restart_python/japanese_vocab.json', 'r', encoding='utf-8') as file:
+    vocab_dict = json.load(file)
 score = 0
 question =0
 
 while True:
     random_vocab = random.choice(list(vocab_dict.keys()))
 
-    print(f"What is the English of {random_vocab}")
+    print(f"What is the Chinese of {random_vocab}")
     answer = input()
     if (answer == 'q'):
         break
