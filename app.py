@@ -284,4 +284,7 @@ def handle_postback(event):
         )
 
 if __name__ == "__main__":
-    app.run(port=5000, debug=True)
+    # 從環境變數抓取 Render 分配的 Port，如果沒有就預設 5000
+    port = int(os.environ.get('PORT', 5000))
+    # host='0.0.0.0' 就是強制打開外網大門的關鍵！
+    app.run(host='0.0.0.0', port=port)
