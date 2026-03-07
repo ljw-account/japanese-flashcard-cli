@@ -20,8 +20,12 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     ReplyMessageRequest,
-    TextMessage
+    TextMessage,
+    TemplateMessage,
+    ButtonsTemplate,
+    PostbackAction
 )
+from linebot.v3.webhooks import PostbackEvent
 from linebot.v3.webhooks import (
     MessageEvent,
     TextMessageContent
@@ -52,12 +56,18 @@ except Exception as e:
     exit(1)
 
 # 3. 讀取本地端單字庫 (給舊的抽考功能用)
-vocab_file_path = 'japanese_vocab.json'
+# 3. [升級] 從 Firebase 讀取單字庫
+# 注意：這會在伺服器啟動時執行一次。如果單字庫非常大(破萬)，建議改用其他隨機抽取策略。
+vocab_dict = {}
 try:
-    with open(vocab_file_path, 'r', encoding='utf-8') as file:
-        vocab_dict = json.load(file)
-except FileNotFoundError:
-    vocab_dict = {}
+    docs = db.collection('vocabulary').stream()
+    for doc in docs:
+        data = doc.to_dict()
+        # 格式轉換回原本的 key:value 結構
+        vocab_dict[data['word']] = data['meaning']
+    print(f"✅ 已從雲端載入 {len(vocab_dict)} 個單字。")
+except Exception as e:
+    print(f"❌ 讀取雲端單字庫失敗: {e}")
 
 app = Flask(__name__)
 handler = WebhookHandler(channel_secret)
@@ -80,6 +90,48 @@ def callback():
 
 # 4. 訊息處理核心邏輯 (雙模式切換)
 @handler.add(MessageEvent, message=TextMessageContent)
+def send_flashcard(reply_token):
+    """
+    核心邏輯：隨機抽一個單字，並傳送「問題卡片（按鈕）」給使用者
+    """
+    # 這裡我們需要全域變數 db 和 vocab_dict
+    # 為了避免變數範圍問題，我們直接使用全域的
+    global vocab_dict
+
+    if not vocab_dict:
+        # 如果單字庫是空的
+        # 注意：這裡不能直接回傳 TextMessage 物件，因為它只是物件，要包在 ReplyMessageRequest 裡發送
+        # 但為了簡化，我們先發送一個簡單的文字
+        msg = TextMessage(text="單字庫目前是空的，請先去 Firebase 新增單字！")
+    else:
+        # 1. 隨機抽字
+        word = random.choice(list(vocab_dict.keys()))
+        
+        # 2. 製作「按鈕樣板消息」 (修正為 TemplateMessage)
+        msg = TemplateMessage(
+            alt_text=f"單字卡：{word}",
+            template=ButtonsTemplate(
+                title=f"🇯🇵 {word}",
+                text="請回想中文意思...",
+                actions=[
+                    # 當使用者按這個按鈕，LINE 會偷偷傳送 data 給後端
+                    PostbackAction(
+                        label="👀 看答案",
+                        data=f"action=show_answer&word={word}"
+                    )
+                ]
+            )
+        )
+
+    # 3. 發送訊息
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        line_bot_api.reply_message_with_http_info(
+            ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[msg]
+            )
+        )
 def handle_message(event):
     user_id = event.source.user_id
     user_text = event.message.text.strip()
@@ -113,20 +165,14 @@ def handle_message(event):
     # ==========================================
     # 模式 B：進入原本的「單字抽考」模式
     # ==========================================
-    elif user_text == '抽考':
-        if not vocab_dict:
-            reply_text = "目前單字庫是空的！"
-        else:
-            random_vocab = random.choice(list(vocab_dict.keys()))
-            correct_answer = vocab_dict[random_vocab]
-            
-            # 【狀態切換】將使用者狀態設為 vocab
-            user_ref.set({
-                'mode': 'vocab',
-                'question': random_vocab,
-                'correct_answer': correct_answer
-            })
-            reply_text = f"請問【{random_vocab}】的中文是什麼？"
+    # ... 前面的今日新聞邏輯 ...
+    
+    # 模式 B：進入「Anki 閃卡」模式 (取代原本的抽考，或並存)
+    elif user_text == '背單字' or user_text == '抽考':
+        send_flashcard(event.reply_token) # 移除了 user_id 參數，因為函式內沒用到
+        return 
+
+    # ... 後面的邏輯 ...
 
     # ==========================================
     # 模式 C：使用者回答問題 (系統根據狀態自動批改)
@@ -169,6 +215,71 @@ def handle_message(event):
             ReplyMessageRequest(
                 reply_token=event.reply_token,
                 messages=[TextMessage(text=reply_text)]
+            )
+        )
+
+@handler.add(PostbackEvent)
+def handle_postback(event):
+    # 解析回傳的 data
+    data = event.postback.data
+    params = dict(item.split('=') for item in data.split('&'))
+    action = params.get('action')
+    word = params.get('word')
+    user_id = event.source.user_id # 取得 User ID 用來存錯題
+
+    reply_msgs = []
+
+    # 情境 A：使用者點了「看答案」
+    if action == 'show_answer':
+        meaning = vocab_dict.get(word, "找不到翻譯")
+        
+        # 製作「答案卡片」 (修正為 TemplateMessage)
+        reply_msgs.append(TemplateMessage(
+            alt_text=f"答案：{meaning}",
+            template=ButtonsTemplate(
+                title=f"中文：{meaning}",
+                text=f"日文：{word}\n你剛才記對了嗎？",
+                actions=[
+                    PostbackAction(label="✅ 記得", data=f"action=result_good&word={word}"),
+                    PostbackAction(label="❌ 忘了", data=f"action=result_bad&word={word}")
+                ]
+            )
+        ))
+
+    # 情境 B：使用者評分（記得/忘了） -> 紀錄後直接下一題
+    elif action in ['result_good', 'result_bad']:
+        # 如果是「忘了」，存入錯題本
+        if action == 'result_bad':
+            meaning = vocab_dict.get(word)
+            if meaning:
+                db.collection('mistakes').document(user_id).set({word: meaning}, merge=True)
+
+        # 🔥 重點：直接產生下一張閃卡
+        next_word = random.choice(list(vocab_dict.keys()))
+        
+        # 製作下一張題目卡 (修正為 TemplateMessage)
+        next_card = TemplateMessage(
+            alt_text=f"單字卡：{next_word}",
+            template=ButtonsTemplate(
+                title=f"🇯🇵 {next_word}",
+                text="下一題！請回想中文意思...",
+                actions=[
+                    PostbackAction(
+                        label="👀 看答案",
+                        data=f"action=show_answer&word={next_word}"
+                    )
+                ]
+            )
+        )
+        reply_msgs.append(next_card)
+
+    # 統一發送回覆
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        line_bot_api.reply_message_with_http_info(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=reply_msgs
             )
         )
 
