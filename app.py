@@ -79,14 +79,47 @@ def callback():
         abort(400)
     return 'OK'
 
+def get_next_word(user_id):
+    """
+    智慧抽題邏輯：比對單字庫與使用者的「已熟記清單」，只抽出還沒背熟的單字。
+    """
+    global vocab_dict
+    if not vocab_dict:
+        return None
+
+    # 1. 去 Firebase 抓取這個使用者「已經背熟」的單字
+    rem_doc = db.collection('remembered').document(user_id).get()
+    
+    if rem_doc.exists:
+        # 取出所有已經記得的單字 (keys)
+        remembered_words = set(rem_doc.to_dict().keys())
+    else:
+        remembered_words = set()
+
+    # 2. 獲取單字庫全部的單字
+    all_words = set(vocab_dict.keys())
+
+    # 3. 集合運算：全部單字 - 已背熟單字 = 待背單字
+    pending_words = list(all_words - remembered_words)
+
+    # 4. 如果待背清單空了，代表全破關了！
+    if not pending_words:
+        return "ALL_CLEAR"
+
+    # 5. 從待背清單中隨機抽一個
+    return random.choice(pending_words)
+
 # ==========================================
 # 工具函式：發送閃卡 (注意：上面沒有 decorator)
 # ==========================================
-def send_flashcard(reply_token):
-    if not vocab_dict:
-        msg = TextMessage(text="單字庫目前是空的，請先去 Firebase 新增單字！")
+def send_flashcard(reply_token, user_id): # 多加了 user_id
+    word = get_next_word(user_id) # 改用智慧抽題
+
+    if not word:
+        msg = TextMessage(text="單字庫目前是空的，請先去新增單字！")
+    elif word == "ALL_CLEAR":
+        msg = TextMessage(text="🎉 太神啦！資料庫裡所有的單字你都背熟了！請去擴充新單字吧！")
     else:
-        word = random.choice(list(vocab_dict.keys()))
         msg = TemplateMessage(
             alt_text=f"單字卡：{word}",
             template=ButtonsTemplate(
@@ -103,10 +136,7 @@ def send_flashcard(reply_token):
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message_with_http_info(
-            ReplyMessageRequest(
-                reply_token=reply_token,
-                messages=[msg]
-            )
+            ReplyMessageRequest(reply_token=reply_token, messages=[msg])
         )
 
 # ==========================================
@@ -133,7 +163,7 @@ def handle_message(event):
 
     elif user_text in ['背單字', '抽考']:
         # 呼叫閃卡工具，只傳入字串 token
-        send_flashcard(event.reply_token)
+        send_flashcard(event.reply_token, user_id)
         return
 
     else:
@@ -188,14 +218,34 @@ def handle_postback(event):
             )
         ))
 
-    elif action in ['result_good', 'result_bad']:
-        if action == 'result_bad':
+    elif action in['result_good', 'result_bad']:
+        # 【記錄狀態】
+        if action == 'result_good':
+            # 存入已熟記清單 (remembered)
+            db.collection('remembered').document(user_id).set({word: True}, merge=True)
+            # 如果原本在錯題本裡，可以把它移除 (可選)
+            try:
+                db.collection('mistakes').document(user_id).update({word: firestore.DELETE_FIELD})
+            except:
+                pass
+
+        elif action == 'result_bad':
+            # 存入錯題本 (mistakes)
             meaning = vocab_dict.get(word)
             if meaning:
                 db.collection('mistakes').document(user_id).set({word: meaning}, merge=True)
+            # 如果不小心按錯，把它從已熟記清單移除
+            try:
+                db.collection('remembered').document(user_id).update({word: firestore.DELETE_FIELD})
+            except:
+                pass
 
-        if vocab_dict:
-            next_word = random.choice(list(vocab_dict.keys()))
+        # 【直接發送下一題】
+        next_word = get_next_word(user_id) # 改用智慧抽題
+        
+        if next_word == "ALL_CLEAR":
+            reply_msgs.append(TextMessage(text="🎉 恭喜將軍！您已將所有單字斬於馬下！請前往擴充單字庫！"))
+        elif next_word:
             next_card = TemplateMessage(
                 alt_text=f"單字卡：{next_word}",
                 template=ButtonsTemplate(
