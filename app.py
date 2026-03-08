@@ -144,6 +144,7 @@ def send_flashcard(reply_token, user_id): # 多加了 user_id
 # ==========================================
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
+    global vocab_dict
     user_id = event.source.user_id
     user_text = event.message.text.strip()
     reply_text = ""
@@ -165,6 +166,18 @@ def handle_message(event):
         # 呼叫閃卡工具，只傳入字串 token
         send_flashcard(event.reply_token, user_id)
         return
+    
+    elif user_text == '更新大腦':
+    # 重新去 Firebase 抓取最新單字，覆蓋掉舊的 RAM
+        vocab_dict.clear()
+        try:
+            docs = db.collection('vocabulary').stream()
+            for doc in docs:
+                data = doc.to_dict()
+                vocab_dict[data['word']] = data['meaning']
+            reply_text = f"✅ 報告將軍，大腦更新完畢！目前共有 {len(vocab_dict)} 個單字。"
+        except Exception as e:
+            reply_text = f"❌ 更新失敗: {e}"
 
     else:
         user_doc = user_ref.get()

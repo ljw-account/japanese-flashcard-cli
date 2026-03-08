@@ -13,7 +13,7 @@ client = genai.Client(api_key=api_key)
 # 設定單字庫檔案路徑
 VOCAB_FILE = 'japanese_vocab.json'
 
-def generate_vocab_list(level="N4", count=30, topic="日常與旅遊"):
+def generate_vocab_list(level, count, topic):
     """
     呼叫 AI 生成指定程度與主題的單字
     """
@@ -86,12 +86,6 @@ def save_to_json(new_vocab_str):
 
 if __name__ == "__main__":
     # 你可以在這裡修改想要生成的等級和主題
-    generate_vocab_list(level="N4", count=50, topic="生活與職場")
-    
-    # 把 AI 回傳的字串存入檔案
-    # 注意：generate_vocab_list 回傳的是字串，save_to_json 負責解析
-    # 這裡我們稍微修改一下流程，讓 generate_vocab_list 直接回傳字串給 save_to_json
-    
-    # 重新執行一次正確的流程：
-    json_str = generate_vocab_list(level="N4", count=50, topic="生活與職場")
+
+    json_str = generate_vocab_list(level="N3", count=100, topic="生活")
     save_to_json(json_str)
